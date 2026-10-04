@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import math
 import random
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
@@ -104,8 +105,16 @@ class RetryPolicy:
         """Un-jittered, capped window for ``attempt`` (1-based)."""
         if attempt < 1:
             raise ValueError("attempt is 1-based")
-        window = self.base_delay * (self.multiplier ** (attempt - 1))
-        return builtins.min(window, self.max_delay)
+        if self.base_delay <= 0 or self.max_delay <= 0:
+            return 0.0
+        if self.multiplier == 1.0:
+            return builtins.min(self.base_delay, self.max_delay)
+        # Compare in log space so a large attempt count can never overflow:
+        # past this exponent the series is already >= max_delay and the cap wins.
+        cap_exponent = math.log(self.max_delay / self.base_delay) / math.log(self.multiplier)
+        if attempt - 1 >= cap_exponent:
+            return self.max_delay
+        return builtins.min(self.base_delay * (self.multiplier ** (attempt - 1)), self.max_delay)
 
     def delay_for(self, attempt: int, *, rng: random.Random | None = None) -> float:
         """Seconds to sleep before ``attempt``, including jitter."""
