@@ -86,16 +86,32 @@ RESUMABLE_STEP_STATUSES = (
 
 
 def _dumps(value: Any) -> str | None:
-    return None if value is None else json.dumps(value, default=str)
+    """Encode for storage, refusing to silently change the value's type.
+
+    ``json.dumps(..., default=str)`` would store ``Decimal("1.50")`` as ``'1.50'``
+    and a ``datetime`` as its ``str()``. An in-process run would then hand the live
+    object to ``compensate`` while a crash-resume handed it a string, so the undo
+    raised (or silently rolled back the wrong thing). Better to refuse the write
+    than persist a value recovery cannot reproduce (issue #23).
+    """
+    if value is None:
+        return None
+    try:
+        return json.dumps(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"step data is not JSON-serialisable ({exc}); it cannot be journalled "
+            f"and would not survive crash recovery. Return a JSON-native value "
+            f"(dict/list/str/int/float/bool/None), or keep it out of the result."
+        ) from exc
 
 
 def _loads(raw: str | None) -> Any:
     if raw is None:
         return None
-    try:
-        return json.loads(raw)
-    except (TypeError, ValueError):  # pragma: no cover - defensive
-        return raw
+    # A decode failure used to fall back to the raw string, so a corrupt row turned
+    # a compensation's ``result`` into a str. Surface it instead (issue #23).
+    return json.loads(raw)
 
 
 class SagaJournal:
