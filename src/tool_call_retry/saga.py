@@ -442,10 +442,11 @@ class Saga:
                 continue
             try:
                 result = invoke(undo, name, call.result)
+                # Journalling the result is inside the try: a write failure must not
+                # mask the real SagaFailed nor abort the remaining undos (#23).
+                self._end_step_rollback(run, call, result, compensated)
             except BaseException as exc:  # noqa: BLE001 - reported, never swallowed
                 self._end_step_rollback_failed(run, call, errors, exc)
-                continue
-            self._end_step_rollback(run, call, result, compensated)
         return compensated, errors
 
     async def _arollback(
@@ -461,10 +462,10 @@ class Saga:
                 continue
             try:
                 result = await self._resolve(invoke(undo, name, call.result))
+                # Journalling the result is inside the try, as on the sync path (#23).
+                self._end_step_rollback(run, call, result, compensated)
             except BaseException as exc:  # noqa: BLE001 - reported, never swallowed
                 self._end_step_rollback_failed(run, call, errors, exc)
-                continue
-            self._end_step_rollback(run, call, result, compensated)
         return compensated, errors
 
     def _begin_rollback(self, run: SagaRun) -> tuple[list[str], dict[str, str]]:
