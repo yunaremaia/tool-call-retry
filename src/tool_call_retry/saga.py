@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import inspect
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
-from tool_call_retry.errors import SagaFailed
+from tool_call_retry.errors import NonRetryableError, SagaFailed
 from tool_call_retry.journal import SagaJournal
-from tool_call_retry.models import RetryAttempt, SagaRun, StepStatus
+from tool_call_retry.models import RetryAttempt, SagaRun, StepStatus, ToolCall
 from tool_call_retry.policy import RetryPolicy
 
 
@@ -161,14 +161,18 @@ class Saga:
         return self._finish(run)
 
     async def aexecute(self, **context: Any) -> SagaRun:
-        """Async twin of :meth:`execute`; sync and async steps may be mixed."""
+        """Async twin of :meth:`execute`; sync and async steps may be mixed.
+
+        An ``async def`` compensation is awaited here, so it really runs before
+        the step is reported as compensated.
+        """
         run, resumed = self._start()
         for step in self._pending(run, resumed):
             self._ensure_journalled(run, step)
             try:
                 result = await self._run_step_async(step, run, context)
             except BaseException as exc:  # noqa: BLE001 - reported as SagaFailed
-                self._fail(run, step, exc, context)
+                await self._afail(run, step, exc, context)
             self._succeed(run, step, result)
         return self._finish(run)
 
@@ -200,6 +204,24 @@ class Saga:
         self, run: SagaRun, step: SagaStep, failure: BaseException, context: dict[str, Any]
     ) -> None:
         """Mark the step failed, roll back, persist, then raise :class:`SagaFailed`."""
+        completed = self._mark_step_failed(run, step, failure)
+        self._raise_saga_failed(
+            run, step, failure, completed, *self._compensate(run, context)
+        )
+
+    async def _afail(
+        self, run: SagaRun, step: SagaStep, failure: BaseException, context: dict[str, Any]
+    ) -> None:
+        """Async twin of :meth:`_fail`; awaits an ``async def`` compensation."""
+        completed = self._mark_step_failed(run, step, failure)
+        self._raise_saga_failed(
+            run, step, failure, completed, *await self._acompensate(run, context)
+        )
+
+    def _mark_step_failed(
+        self, run: SagaRun, step: SagaStep, failure: BaseException
+    ) -> list[str]:
+        """Record the terminal failure; return the completed steps to roll back."""
         step_id = run.step_by_name(step.name).step_id
         message = f"{type(failure).__name__}: {failure}"
         run.transition_step(step_id, StepStatus.FAILED, error=message)
@@ -207,8 +229,18 @@ class Saga:
             self.journal.mark_step_failed(run.saga_id, step_id, message)
         # Snapshot the completed set *before* compensating rewrites those statuses,
         # so the reported error reflects what actually ran.
-        completed = run.completed_steps
-        compensated, comp_errors = self._compensate(run, context)
+        return run.completed_steps
+
+    def _raise_saga_failed(
+        self,
+        run: SagaRun,
+        step: SagaStep,
+        failure: BaseException,
+        completed: list[str],
+        compensated: list[str],
+        comp_errors: dict[str, str],
+    ) -> None:
+        """Close the saga out as failed and raise the LLM-facing report."""
         run.transition_saga_status("failed")
         if self.journal is not None:
             self.journal.mark_saga_failed(run.saga_id)
@@ -385,41 +417,129 @@ class Saga:
             ``(compensated_step_names, errors_by_step_name)``. A compensation that
             raises does not stop the remaining ones and is reported to the caller.
         """
+        return self._rollback(
+            run, lambda undo, name, result: self._call_compensation(undo, name, result, context)
+        )
+
+    async def _acompensate(
+        self, run: SagaRun, context: dict[str, Any]
+    ) -> tuple[list[str], dict[str, str]]:
+        """Async twin of :meth:`_compensate`; awaits an ``async def`` undo."""
+        return await self._arollback(
+            run,
+            lambda undo, name, result: self._acall_compensation(undo, name, result, context),
+        )
+
+    def _rollback(
+        self,
+        run: SagaRun,
+        invoke: Callable[[Callable[..., Any], str, Any], Any],
+    ) -> tuple[list[str], dict[str, str]]:
+        compensated, errors = self._begin_rollback(run)
+        for name in run.completed_steps_to_compensate:
+            undo, call = self._begin_step_rollback(run, name, errors)
+            if undo is None or call is None:
+                continue
+            try:
+                result = invoke(undo, name, call.result)
+            except BaseException as exc:  # noqa: BLE001 - reported, never swallowed
+                self._end_step_rollback_failed(run, call, errors, exc)
+                continue
+            self._end_step_rollback(run, call, result, compensated)
+        return compensated, errors
+
+    async def _arollback(
+        self,
+        run: SagaRun,
+        invoke: Callable[[Callable[..., Any], str, Any], Any],
+    ) -> tuple[list[str], dict[str, str]]:
+        """Async twin of :meth:`_rollback`; ``invoke`` may return an awaitable."""
+        compensated, errors = self._begin_rollback(run)
+        for name in run.completed_steps_to_compensate:
+            undo, call = self._begin_step_rollback(run, name, errors)
+            if undo is None or call is None:
+                continue
+            try:
+                result = await self._resolve(invoke(undo, name, call.result))
+            except BaseException as exc:  # noqa: BLE001 - reported, never swallowed
+                self._end_step_rollback_failed(run, call, errors, exc)
+                continue
+            self._end_step_rollback(run, call, result, compensated)
+        return compensated, errors
+
+    def _begin_rollback(self, run: SagaRun) -> tuple[list[str], dict[str, str]]:
         if self.journal is not None:
             self.journal.begin_compensation(run.saga_id)
         run.transition_saga_status("compensating")
+        return [], {}
 
-        compensated: list[str] = []
-        errors: dict[str, str] = {}
-        for name in run.completed_steps_to_compensate:
-            step = self._step_named(name)
-            if step is None or step.compensate is None:
-                errors.setdefault(name, "no compensation registered")
-                continue
-            undo = step.compensate
-            call = run.step_by_name(name)
-            run.transition_step(call.step_id, StepStatus.COMPENSATING)
-            if self.journal is not None:
-                self.journal.begin_step_compensation(run.saga_id, call.step_id)
-            try:
-                result = self._call_compensation(undo, name, call.result, context)
-            except BaseException as exc:  # noqa: BLE001 - reported, never swallowed
-                message = f"{type(exc).__name__}: {exc}"
-                errors[name] = message
-                # The undo raised, so the step is stuck mid-compensation: its
-                # side effect is still applied and needs manual attention.
-                if self.journal is not None:
-                    self.journal.mark_step_compensation_failed(
-                        run.saga_id, call.step_id, message
-                    )
-                continue
-            run.transition_step(call.step_id, StepStatus.COMPENSATED, result=result)
-            if self.journal is not None:
-                self.journal.record_compensation(run.saga_id, call.step_id, result)
-            compensated.append(name)
-        return compensated, errors
+    def _begin_step_rollback(
+        self, run: SagaRun, name: str, errors: dict[str, str]
+    ) -> tuple[Callable[..., Any] | None, ToolCall | None]:
+        """Move a step into ``compensating``; undo is ``None`` when it has none."""
+        step = self._step_named(name)
+        if step is None or step.compensate is None:
+            errors.setdefault(name, "no compensation registered")
+            return None, None
+        call = run.step_by_name(name)
+        run.transition_step(call.step_id, StepStatus.COMPENSATING)
+        if self.journal is not None:
+            self.journal.begin_step_compensation(run.saga_id, call.step_id)
+        return step.compensate, call
+
+    def _end_step_rollback(
+        self, run: SagaRun, call: ToolCall, result: Any, compensated: list[str]
+    ) -> None:
+        """The undo finished: record it as compensated."""
+        run.transition_step(call.step_id, StepStatus.COMPENSATED, result=result)
+        if self.journal is not None:
+            self.journal.record_compensation(run.saga_id, call.step_id, result)
+        compensated.append(call.name)
+
+    def _end_step_rollback_failed(
+        self, run: SagaRun, call: ToolCall, errors: dict[str, str], exc: BaseException
+    ) -> None:
+        """The undo raised, so the step is stuck mid-compensation: its side effect
+        is still applied and needs manual attention."""
+        message = f"{type(exc).__name__}: {exc}"
+        errors[call.name] = message
+        if self.journal is not None:
+            self.journal.mark_step_compensation_failed(run.saga_id, call.step_id, message)
+
+    @staticmethod
+    async def _resolve(outcome: Any) -> Any:
+        """Await a coroutine the undo returned; pass anything else through."""
+        return await outcome if inspect.isawaitable(outcome) else outcome
 
     def _call_compensation(
+        self,
+        undo: Callable[..., Any],
+        name: str,
+        result: Any,
+        context: dict[str, Any],
+    ) -> Any:
+        outcome = self._invoke_undo(undo, name, result, context)
+        if inspect.isawaitable(outcome):
+            # An `async def` undo has NOT run. Close the coroutine so it does not
+            # warn later, and report it as an error rather than as compensated.
+            if isinstance(outcome, Coroutine):
+                outcome.close()
+            raise NonRetryableError(
+                f"compensation for step {name!r} is a coroutine function and cannot "
+                f"run under execute(); use aexecute() or a synchronous undo"
+            )
+        return outcome
+
+    async def _acall_compensation(
+        self,
+        undo: Callable[..., Any],
+        name: str,
+        result: Any,
+        context: dict[str, Any],
+    ) -> Any:
+        return await self._resolve(self._invoke_undo(undo, name, result, context))
+
+    def _invoke_undo(
         self,
         undo: Callable[..., Any],
         name: str,

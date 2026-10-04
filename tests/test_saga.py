@@ -420,19 +420,32 @@ def test_step_without_compensation_registered_does_not_break_compensation_chain(
 
 
 def test_async_saga_awaits_async_steps_and_compensates(journal):
+    """Async steps *and* async compensations: both must be awaited.
+
+    Issue #17: this test used a sync ``lambda`` undo, so it passed even though an
+    ``async def`` compensation was never awaited.
+    """
     import asyncio
 
     ledger = Recorder()
 
+    async def refund(**kwargs):
+        await asyncio.sleep(0)
+        ledger.log("refund")
+
+    async def unship(**kwargs):
+        await asyncio.sleep(0)
+        ledger.log("unship")
+
     async def main():
         saga = Saga(name="checkout", journal=journal, saga_id="saga-async")
 
-        @saga.tool("charge", compensate=lambda: ledger.log("refund"))
+        @saga.tool("charge", compensate=refund)
         async def charge():
             ledger.log("charge")
             return "ch_1"
 
-        @saga.tool("ship", compensate=lambda: ledger.log("unship"))
+        @saga.tool("ship", compensate=unship)
         async def ship():
             ledger.log("ship")
             raise NonRetryableError("out of stock")
@@ -441,8 +454,9 @@ def test_async_saga_awaits_async_steps_and_compensates(journal):
 
     with pytest.raises(SagaFailed):
         asyncio.run(main())
-    # 'ship' failed, so only 'charge' is compensated.
+    # 'ship' failed, so only 'charge' is compensated -- and the async undo really ran.
     assert ledger.events == ["charge", "ship", "refund"]
+    assert journal.load_saga("saga-async").steps[0].status is StepStatus.COMPENSATED
 
 
 def test_step_results_are_available_to_compensation(journal):
