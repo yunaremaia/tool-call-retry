@@ -155,9 +155,9 @@ class Saga:
             self._ensure_journalled(run, step)
             try:
                 result = self._run_step_sync(step, run, context)
+                self._succeed(run, step, result)
             except BaseException as exc:  # noqa: BLE001 - reported as SagaFailed
                 self._fail(run, step, exc, context)
-            self._succeed(run, step, result)
         return self._finish(run)
 
     async def aexecute(self, **context: Any) -> SagaRun:
@@ -171,9 +171,9 @@ class Saga:
             self._ensure_journalled(run, step)
             try:
                 result = await self._run_step_async(step, run, context)
+                self._succeed(run, step, result)
             except BaseException as exc:  # noqa: BLE001 - reported as SagaFailed
                 await self._afail(run, step, exc, context)
-            self._succeed(run, step, result)
         return self._finish(run)
 
     def _reject_async_steps(self) -> None:
@@ -196,9 +196,12 @@ class Saga:
 
     def _succeed(self, run: SagaRun, step: SagaStep, result: Any) -> None:
         step_id = run.step_by_name(step.name).step_id
-        run.transition_step(step_id, StepStatus.COMPLETED, result=result)
+        # Journal before transitioning in memory: a refused write must leave the
+        # step in ``running`` (from which FAILED is legal) so the caller's
+        # compensation path can mark it failed instead of raising InvalidTransition.
         if self.journal is not None:
             self.journal.mark_step_completed(run.saga_id, step_id, result)
+        run.transition_step(step_id, StepStatus.COMPLETED, result=result)
 
     def _fail(
         self, run: SagaRun, step: SagaStep, failure: BaseException, context: dict[str, Any]
