@@ -241,7 +241,7 @@ than silently doing the wrong thing.
 
 ```bash
 pip install -e ".[dev]"
-pytest              # 135 tests
+pytest              # 168 tests
 ruff check .
 ```
 

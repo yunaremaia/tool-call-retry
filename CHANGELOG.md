@@ -5,11 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2026-10-03
+## [0.1.0] - 2026-10-05
 
-First release. This is an **early MVP**: the repository has four commits, all of
-the functionality below landed in a single `feat:` commit. The API is usable but
-not yet stable, and there is no publish workflow.
+First release. This is an **early MVP**: nine commits, of which one `feat:`
+commit landed the functionality below and the rest are packaging, docs and
+correctness fixes. The API is usable but not yet stable, and there is no publish
+workflow.
 
 ### Not on PyPI
 
@@ -22,6 +23,39 @@ pip install git+https://github.com/yunaremaia/tool-call-retry.git
 
 The repository has no publish workflow and no PyPI project. Both PyPI endpoints
 were checked and the name is currently unclaimed, but nothing has been uploaded.
+
+### Fixed
+
+Correctness fixes landed after the initial `feat:` commit and before this
+release. Each shipped with regression tests.
+
+- **A partially failed rollback is no longer reported as a consistent system**
+  (#11). `SagaFailed.summary()` branched on the compensated list alone, so when
+  some undos succeeded and *another* raised, it printed
+  `System state is consistent.` while the stuck step's side effect was still
+  applied. It now names the stuck steps and reports that the system may be
+  inconsistent and needs manual cleanup.
+- **Async compensations are awaited.** `_fail()` reached the synchronous
+  compensation path from both execution paths, so an `async def` `compensate`
+  was never awaited, yet was journalled as `compensation`, appended to
+  `SagaFailed.compensated` and reported as consistent. The rollback chain is now
+  shared between the sync and async paths, and the sync path refuses to report a
+  coroutine as compensated.
+- **Journal writes refuse lossy values.** `_dumps()` encoded with
+  `json.dumps(value, default=str)`, so a `Decimal` or `datetime` step result was
+  persisted as a string. In-process, `compensate` received the live object;
+  after a crash-and-resume it received strings, and a `Decimal` amount then
+  raised `TypeError` mid-compensation. The encoding failure now surfaces with the
+  offending type named.
+- **`backoff_window()` no longer overflows.** It computed
+  `base_delay * multiplier ** (attempt - 1)` before clamping, so a legal
+  `max_attempts=1025` or `multiplier=1e300` raised `OverflowError` instead of
+  returning `max_delay`. The comparison now happens in log space.
+- **Observer callbacks cannot mask the real error.** A raising `on_attempt` or
+  `sleeper` callback replaced the actual `TimeoutError` with its own failure.
+  Both are now guarded and the observer's error is appended to the attempt
+  record. `KeyboardInterrupt` and `SystemExit` still propagate, so the guard does
+  not make the policy harder to cancel.
 
 ### Added
 
@@ -81,7 +115,7 @@ were checked and the name is currently unclaimed, but nothing has been uploaded.
 - `pyproject.toml` with the `tool-call-retry` console script, `Development
   Status :: 3 - Alpha`, and a `dev` extra for `pytest`, `pytest-asyncio` and
   `ruff`.
-- 135 tests across the runtime, policy, journal, models, CLI and package metadata.
+- 168 tests across the runtime, policy, journal, models, CLI and package metadata.
 - GitHub Actions CI, an MIT `LICENSE`, and a README with a worked example and a
   runnable `examples/checkout.yml`.
 
