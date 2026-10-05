@@ -99,18 +99,22 @@ class SagaFailed(ToolCallRetryError):
 
     def summary(self) -> str:
         """Human-readable state of the system after the saga gave up."""
-        if self.compensated:
+        stuck = list(self.compensation_errors)
+        if self.compensated and not stuck:
             rolled = f"steps {', '.join(self.compensated)} compensated"
             state = "System state is consistent."
         elif not self.compensated and not self.completed:
             rolled = "nothing to compensate"
             state = "System state is unchanged."
         else:
-            rolled = (
-                f"compensation incomplete for steps {', '.join(self.completed)}"
-                if self.completed
-                else "nothing to compensate"
-            )
+            # A step whose undo raised stays mid-compensation with its side
+            # effect still applied, so the system is inconsistent no matter how
+            # many *other* steps unwound cleanly. `completed` is the fallback for
+            # a completed step that had no undo registered at all (#11).
+            names = stuck or list(self.completed)
+            rolled = f"compensation incomplete for steps {', '.join(names)}"
+            if self.compensated:
+                rolled = f"steps {', '.join(self.compensated)} compensated, {rolled}"
             state = "System state may be inconsistent; manual cleanup required."
         done = (
             f"steps {', '.join(self.completed)} succeeded"
