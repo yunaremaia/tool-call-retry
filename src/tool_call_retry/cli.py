@@ -34,9 +34,7 @@ class ConfigError(Exception):
 def load_callable(target: str) -> Any:
     """Resolve a ``module:function`` string (or a builtin name) to a callable."""
     if ":" not in target:
-        raise ConfigError(
-            f"step target {target!r} must use 'module:function' syntax"
-        )
+        raise ConfigError(f"step target {target!r} must use 'module:function' syntax")
     module_name, _, attr = target.partition(":")
     if not module_name or not attr:
         raise ConfigError(f"step target {target!r} must use 'module:function' syntax")
@@ -258,8 +256,7 @@ def cmd_recover(args: argparse.Namespace) -> int:
             print("no interrupted sagas")
         for row in pending:
             print(
-                f"{row['id']} ({row['name'] or 'saga'}): "
-                f"{row['interrupted_steps']} step(s) pending"
+                f"{row['id']} ({row['name'] or 'saga'}): {row['interrupted_steps']} step(s) pending"
             )
         for resumed in payload["resumed"]:
             print(f"resumed {resumed['saga_id']}: {resumed['status']}")
