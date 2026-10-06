@@ -153,6 +153,20 @@ def saga_payload(run, extra: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 # -- subcommands -----------------------------------------------------------
+def saga_failed_payload(exc: SagaFailed) -> dict[str, Any]:
+    cause = exc.root_cause()
+    return {
+        "saga_id": exc.saga_id,
+        "status": "failed",
+        "failed_step": exc.failed_step,
+        "error": f"{type(cause).__name__}: {cause}",
+        "completed": exc.completed,
+        "compensated": exc.compensated,
+        "compensation_errors": exc.compensation_errors,
+        "summary": exc.summary(),
+    }
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     config = read_config(args.config)
     journal_path = args.db or config.get("journal") or DEFAULT_DB
@@ -160,23 +174,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         run = saga.execute()
     except SagaFailed as exc:
-        cause = exc.root_cause()
-        detail = f"{type(cause).__name__}: {cause}"
-        payload = {
-            "saga_id": exc.saga_id,
-            "status": "failed",
-            "failed_step": exc.failed_step,
-            "error": detail,
-            "completed": exc.completed,
-            "compensated": exc.compensated,
-            "compensation_errors": exc.compensation_errors,
-            "summary": exc.summary(),
-        }
+        payload = saga_failed_payload(exc)
         if args.json:
             emit(payload, True)
         else:
             print(f"saga {exc.saga_id} failed: {exc.summary()}", file=sys.stderr)
-            print(f"cause: {detail}", file=sys.stderr)
+            print(f"cause: {payload['error']}", file=sys.stderr)
             for step, message in exc.compensation_errors.items():
                 print(f"compensation for {step} failed: {message}", file=sys.stderr)
         return EXIT_SAGA_FAILED
@@ -237,8 +240,13 @@ def cmd_recover(args: argparse.Namespace) -> int:
         try:
             run = saga.execute()
         except SagaFailed as exc:
-            payload["error"] = exc.summary()
-            emit(payload, True) if args.json else print(exc.summary(), file=sys.stderr)
+            if args.json:
+                emit({**payload, **saga_failed_payload(exc)}, True)
+            else:
+                print(f"saga {exc.saga_id} failed: {exc.summary()}", file=sys.stderr)
+                print(f"cause: {type(exc.root_cause()).__name__}: {exc.root_cause()}", file=sys.stderr)
+                for step, message in exc.compensation_errors.items():
+                    print(f"compensation for {step} failed: {message}", file=sys.stderr)
             return EXIT_SAGA_FAILED
         payload["resumed"].append(saga_payload(run))
 
