@@ -244,7 +244,8 @@ def cmd_recover(args: argparse.Namespace) -> int:
                 emit({**payload, **saga_failed_payload(exc)}, True)
             else:
                 print(f"saga {exc.saga_id} failed: {exc.summary()}", file=sys.stderr)
-                print(f"cause: {type(exc.root_cause()).__name__}: {exc.root_cause()}", file=sys.stderr)
+                root_cause = exc.root_cause()
+                print(f"cause: {type(root_cause).__name__}: {root_cause}", file=sys.stderr)
                 for step, message in exc.compensation_errors.items():
                     print(f"compensation for {step} failed: {message}", file=sys.stderr)
             return EXIT_SAGA_FAILED
