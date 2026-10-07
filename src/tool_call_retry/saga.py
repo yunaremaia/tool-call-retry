@@ -19,10 +19,12 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
+import asyncio
+
 from tool_call_retry.errors import NonRetryableError, SagaFailed
 from tool_call_retry.journal import SagaJournal
 from tool_call_retry.models import RetryAttempt, SagaRun, StepStatus, ToolCall
-from tool_call_retry.policy import RetryPolicy
+from tool_call_retry.policy import RetryPolicy, _time_sleep
 
 
 @dataclass
@@ -346,7 +348,7 @@ class Saga:
         self, step: SagaStep, run: SagaRun, step_id: int, context: dict[str, Any]
     ) -> Any:
         policy = self._policy_for(step)
-        sleeper = self.sleep or (lambda _d: None)
+        sleeper = self.sleep or _time_sleep
 
         def on_attempt(attempt: RetryAttempt) -> None:
             record = RetryAttempt(
@@ -383,6 +385,8 @@ class Saga:
         async def no_sleep(_delay: float) -> None:
             if sleeper is not None:
                 sleeper(_delay)
+            else:
+                await asyncio.sleep(_delay)
 
         def on_attempt(attempt: RetryAttempt) -> None:
             record = RetryAttempt(
