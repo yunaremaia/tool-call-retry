@@ -13,13 +13,12 @@ re-runs what never finished.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
-
-import asyncio
 
 from tool_call_retry.errors import NonRetryableError, SagaFailed
 from tool_call_retry.journal import SagaJournal
@@ -181,9 +180,7 @@ class Saga:
     def _reject_async_steps(self) -> None:
         async_steps = [s.name for s in self.steps if s.is_async]
         if async_steps:
-            raise ValueError(
-                "async steps require aexecute(): " + ", ".join(async_steps)
-            )
+            raise ValueError("async steps require aexecute(): " + ", ".join(async_steps))
 
     def _start(self) -> tuple[SagaRun, bool]:
         if not self.steps:
@@ -210,9 +207,7 @@ class Saga:
     ) -> None:
         """Mark the step failed, roll back, persist, then raise :class:`SagaFailed`."""
         completed = self._mark_step_failed(run, step, failure)
-        self._raise_saga_failed(
-            run, step, failure, completed, *self._compensate(run, context)
-        )
+        self._raise_saga_failed(run, step, failure, completed, *self._compensate(run, context))
 
     async def _afail(
         self, run: SagaRun, step: SagaStep, failure: BaseException, context: dict[str, Any]
@@ -223,9 +218,7 @@ class Saga:
             run, step, failure, completed, *await self._acompensate(run, context)
         )
 
-    def _mark_step_failed(
-        self, run: SagaRun, step: SagaStep, failure: BaseException
-    ) -> list[str]:
+    def _mark_step_failed(self, run: SagaRun, step: SagaStep, failure: BaseException) -> list[str]:
         """Record the terminal failure; return the completed steps to roll back."""
         step_id = run.step_by_name(step.name).step_id
         message = f"{type(failure).__name__}: {failure}"
@@ -335,9 +328,7 @@ class Saga:
             self.journal.mark_step_running(run.saga_id, call.step_id)
         return self._invoke_with_retry(step, run, call.step_id, context)
 
-    async def _run_step_async(
-        self, step: SagaStep, run: SagaRun, context: dict[str, Any]
-    ) -> Any:
+    async def _run_step_async(self, step: SagaStep, run: SagaRun, context: dict[str, Any]) -> Any:
         call = run.step_by_name(step.name)
         run.transition_step(call.step_id, StepStatus.RUNNING)
         if self.journal is not None:
