@@ -57,3 +57,15 @@ def test_backoff_window_matches_the_geometric_series_below_the_cap() -> None:
 def test_backoff_window_still_rejects_zero_attempt() -> None:
     with pytest.raises(ValueError, match="1-based"):
         RetryPolicy().backoff_window(0)
+
+
+def test_run_raises_retry_exhausted_not_overflow_for_non_finite_max_delay() -> None:
+    from tool_call_retry.errors import RetryExhausted
+
+    policy = RetryPolicy(max_attempts=10, max_delay=float('inf'), max_total_delay=float('inf'))
+
+    def flaky() -> None:
+        raise TimeoutError('always')
+
+    with pytest.raises(RetryExhausted):
+        policy.run(flaky, sleep=lambda d: None)

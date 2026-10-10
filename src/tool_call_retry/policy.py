@@ -107,6 +107,10 @@ class RetryPolicy:
             raise ValueError("attempt is 1-based")
         if self.base_delay <= 0 or self.max_delay <= 0:
             return 0.0
+        if not math.isfinite(self.max_delay):
+            return float('inf')
+        if not math.isfinite(self.multiplier):
+            return self.base_delay if attempt == 1 else self.max_delay
         if self.multiplier == 1.0:
             return builtins.min(self.base_delay, self.max_delay)
         # Compare in log space so a large attempt count can never overflow:
